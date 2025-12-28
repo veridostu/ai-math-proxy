@@ -1,92 +1,112 @@
-/**
- * AI Math Proxy – Production Server
- * Railway compatible
- */
+// index.js
+import express from 'express';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
+import axios from 'axios';
+import dotenv from 'dotenv';
 
-import express from "express";
-import fetch from "node-fetch";
-import rateLimit from "express-rate-limit";
-import cors from "cors";
+dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const port = process.env.PORT || 3000;
 
-// ===============================
-// Middleware
-// ===============================
+// -------- Middleware --------
+app.use(cors());
+app.use(express.json({ limit: '10mb' })); // büyük payloadlar için
+app.use(express.urlencoded({ extended: true }));
 
-app.use(cors({
-  origin: "*", // Mobile apps
-  methods: ["POST", "GET", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
-
-app.use(express.json({ limit: "5mb" }));
-
-// ===============================
-// Rate Limiting (per IP)
-// ===============================
-
+// -------- Rate Limit --------
 const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 60, // 60 requests per minute
+  windowMs: 60 * 1000, // 1 dakika
+  max: 60, // 1 dakikada 60 istek
   standardHeaders: true,
   legacyHeaders: false,
 });
+app.use(limiter);
 
-app.use("/solve", limiter);
-
-// ===============================
-// Health Check
-// ===============================
-
-app.get("/", (_, res) => {
-  res.json({
-    status: "ok",
-    service: "ai-math-proxy",
-    timestamp: new Date().toISOString(),
-  });
+// -------- Health Check --------
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', message: 'Server is running!' });
 });
 
-// ===============================
-// OpenAI Proxy Endpoint
-// ===============================
-
-app.post("/solve", async (req, res) => {
+// -------- Solve Route (OpenAI Proxy) --------
+app.post('/solve', async (req, res) => {
   try {
+    const data = req.body;
+
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({
-        error: { message: "OpenAI API key is not configured on server." },
-      });
+      return res.status(500).json({ error: 'OPENAI_API_KEY missing' });
     }
 
-    const openaiResponse = await fetch(
-      "https://api.openai.com/v1/chat/completions",
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      data,
       {
-        method: "POST",
         headers: {
-          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         },
-        body: JSON.stringify(req.body),
       }
     );
 
-    const text = await openaiResponse.text();
-
-    res.status(openaiResponse.status).send(text);
-  } catch (error) {
-    console.error("[PROXY ERROR]", error);
-    res.status(500).json({
-      error: { message: "Proxy server error." },
-    });
+    res.json(response.data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to process request', details: err.message });
   }
 });
 
-// ===============================
-// Start Server
-// ===============================
+// -------- Audio TTS Route --------
+app.post('/audio/speech', async (req, res) => {
+  try {
+    const { input, model = 'tts-1', voice = 'alloy', response_format = 'mp3' } = req.body;
 
-app.listen(PORT, () => {
-  console.log(`🚀 AI Math Proxy running on port ${PORT}`);
+    if (!input) return res.status(400).json({ error: 'Input text required' });
+
+    const response = await axios.post(
+      'https://api.openai.com/v1/audio/speech',
+      { input, model, voice, response_format },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        },
+        responseType: 'arraybuffer',
+      }
+    );
+
+    res.set('Content-Type', `audio/${response_format}`);
+    res.send(Buffer.from(response.data));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'TTS failed', details: err.message });
+  }
+});
+
+// -------- Audio STT Route (Whisper) --------
+app.post('/audio/transcriptions', async (req, res) => {
+  try {
+    if (!req.body.file) return res.status(400).json({ error: 'Audio file required' });
+
+    const formData = new FormData();
+    formData.append('file', req.body.file);
+    formData.append('model', req.body.model || 'whisper-1');
+
+    const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
+      headers: {
+        ...formData.getHeaders(),
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+    });
+
+    res.json(response.data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'STT failed', details: err.message });
+  }
+});
+
+// -------- Start Server --------
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
 });
